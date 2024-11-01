@@ -19,62 +19,20 @@ resource "aws_instance" "example" {
   }
 }
 
-resource "aws_vpc" "my_vpc" {
-  cidr_block = "10.0.0.0/16"
-  tags = { Name = "MyVPC" }
-}
 
-# Existing public subnet in one AZ
-resource "aws_subnet" "public_subnet_a" {
-  vpc_id                  = aws_vpc.my_vpc.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = "ap-south-1a"  # Replace with your desired AZ
-  map_public_ip_on_launch = true
+# resource "aws_subnet" "private_subnet" {
+#   vpc_id     = aws_vpc.my_vpc.id
+#   cidr_block = "10.0.2.0/24"
+# }
 
-  tags = {
-    Name = "PublicSubnetA"
-  }
-}
-
-# New public subnet in a different AZ
-resource "aws_subnet" "public_subnet_b" {
-  vpc_id                  = aws_vpc.my_vpc.id
-  cidr_block              = "10.0.3.0/24"
-  availability_zone       = "ap-south-1b"  # Replace with a different AZ
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "PublicSubnetB"
-  }
-}
-
-
-resource "aws_subnet" "private_subnet" {
-  vpc_id     = aws_vpc.my_vpc.id
-  cidr_block = "10.0.2.0/24"
-}
-
-resource "aws_route_table" "public_rt" {
-  vpc_id = aws_vpc.my_vpc.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.my_igw.id
-  }
-}
-
-# Create an Internet Gateway for the VPC
-resource "aws_internet_gateway" "my_igw" {
-  vpc_id = aws_vpc.my_vpc.id
-
-  tags = {
-    Name = "MyInternetGateway"
-  }
-}
-
-
-resource "aws_route_table_association" "public_rt_assoc" {
-  subnet_id      = aws_subnet.public_subnet_a.id
-  route_table_id = aws_route_table.public_rt.id
+module "vpc" {
+  source               = "./modules/vpc"
+  vpc_cidr             = var.vpc_cidr
+  vpc_name             = var.vpc_name
+  public_subnet_a_cidr = var.public_subnet_a_cidr
+  public_subnet_b_cidr = var.public_subnet_b_cidr
+  public_subnet_a_az   = var.public_subnet_a_az
+  public_subnet_b_az   = var.public_subnet_b_az
 }
 
 # Main S3 bucket resource
@@ -150,61 +108,45 @@ resource "aws_launch_template" "my_launch_template" {
 }
 
 
-# Create an Application Load Balancer (ALB)
+# Example of referencing VPC ID and subnet IDs in other resources
 resource "aws_lb" "my_alb" {
   name               = "my-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = []  # Add your security group IDs here if necessary
-  subnets            = [aws_subnet.public_subnet_a.id, aws_subnet.public_subnet_b.id]  # Use both subnets
+  subnets            = module.vpc.public_subnet_ids  # Use module output for subnets
 
   tags = {
     Name = "MyLoadBalancer"
   }
 }
 
-
-# Create a target group for the ALB
+# Define the Application Load Balancer Target Group
 resource "aws_lb_target_group" "my_target_group" {
   name     = "my-target-group"
   port     = 80
   protocol = "HTTP"
-  vpc_id   = aws_vpc.my_vpc.id
+  vpc_id   = module.vpc.vpc_id  # Reference the VPC ID output from the VPC module
 
   health_check {
     path     = "/"
-    port     = "traffic-port"
     protocol = "HTTP"
   }
 }
 
-# Create an ALB listener
-resource "aws_lb_listener" "my_listener" {
-  load_balancer_arn = aws_lb.my_alb.arn
-  port              = 80
-  protocol          = "HTTP"
 
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.my_target_group.arn
-  }
-}
-
-# Define the Auto Scaling Group and attach it to the ALB target group
 resource "aws_autoscaling_group" "my_asg" {
   desired_capacity     = var.asg_desired_capacity
   max_size             = var.asg_max_size
   min_size             = var.asg_min_size
-  vpc_zone_identifier  = [aws_subnet.public_subnet_a.id]
-  health_check_type    = "ELB"
-  health_check_grace_period = 300
+  vpc_zone_identifier  = module.vpc.public_subnet_ids  # Use module output for subnets
 
   launch_template {
     id      = aws_launch_template.my_launch_template.id
     version = "$Latest"
   }
 
-  target_group_arns = [aws_lb_target_group.my_target_group.arn]  # Reference the ALB target group here
+  target_group_arns = [aws_lb_target_group.my_target_group.arn]
 
   tag {
     key                 = "Name"
@@ -213,4 +155,27 @@ resource "aws_autoscaling_group" "my_asg" {
   }
 }
 
+# Define the IAM role for Lambda execution
+resource "aws_iam_role" "lambda_exec" {
+  name = "LambdaExecutionRole-ak"
 
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        },
+        Effect = "Allow"
+      }
+    ]
+  })
+}
+
+# Attach a basic execution policy for Lambda (logging permissions)
+resource "aws_iam_policy_attachment" "lambda_logging" {
+  name       = "lambda_logging_attachment"
+  roles      = [aws_iam_role.lambda_exec.name]
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
